@@ -1,0 +1,129 @@
+name: CI - Lint, Testes e Build
+
+on:
+  push:
+    branches: [main, develop, 'feature/*', 'hotfix/*']
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint + Type Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
+  tests:
+    name: Testes + Cobertura
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: quality
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run tests with coverage
+        env:
+          NODE_ENV: test
+          OPENAI_API_KEY: __OPENAI_API_KEY_CI_PLACEHOLDER__
+        run: npm test
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+
+      - name: PR comment with coverage summary
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let summary = 'Cobertura indisponivel';
+            try {
+              const cov = JSON.parse(fs.readFileSync('./coverage/coverage-summary.json', 'utf8'));
+              const total = cov.total;
+              summary = [
+                '### Relatorio de Cobertura (Vitest v8)',
+                '',
+                '| Metrica        | Valor |',
+                '|----------------|-------|',
+                `| Statements     | ${total.statements.pct}% |`,
+                `| Branches       | ${total.branches.pct}% |`,
+                `| Functions      | ${total.functions.pct}% |`,
+                `| Lines          | ${total.lines.pct}% |`,
+              ].join('\n');
+            } catch (e) {
+              summary = 'Arquivo coverage-summary.json nao gerado.';
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: summary,
+            });
+
+  build:
+    name: Build (TypeScript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [quality, tests]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-build
+          path: dist/
+          retention-days: 7

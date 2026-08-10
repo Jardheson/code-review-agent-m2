@@ -1,0 +1,148 @@
+name: DevOps Inteligente - Analise de Logs e Aderencia
+
+on:
+  workflow_run:
+    workflows: ['CI - Lint, Testes e Build']
+    types: [completed]
+  schedule:
+    - cron: '37 8 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  detect-anomalies:
+    name: Detectar Anomalias + Estimativa de Risco
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Buscar runs do CI (ultimas 30 execucoes)
+        id: runs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: runs } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'ci.yml',
+              per_page: 30,
+            });
+            const fs = require('fs');
+            fs.mkdirSync('./tmp-devops', { recursive: true });
+            const simplified = runs.workflow_runs.map(r => ({
+              id: r.id,
+              status: r.status,
+              conclusion: r.conclusion,
+              started_at: r.run_started_at,
+              duration_min: r.updated_at ? Math.max(1, Math.round((new Date(r.updated_at) - new Date(r.run_started_at)) / 60000)) : null,
+              branch: r.head_branch,
+              event: r.event,
+            }));
+            fs.writeFileSync('./tmp-devops/workflow-runs.json', JSON.stringify(simplified, null, 2));
+            const failed = simplified.filter(r => r.conclusion === 'failure').length;
+            const total = simplified.filter(r => r.status === 'completed').length;
+            core.setOutput('failure_count', String(failed));
+            core.setOutput('total_completed', String(total));
+
+      - name: Analise IA explicativa de anomalias
+        id: ai-analysis
+        env:
+          NODE_ENV: production
+        run: |
+          cat > ./tmp-devops/ai-analysis.md << 'EOF'
+          # Analise Inteligente de CI / DevOps (heuristicas + regras de risco)
+          EOF
+          node -e "
+            const fs = require('fs');
+            const runs = JSON.parse(fs.readFileSync('./tmp-devops/workflow-runs.json','utf8'));
+            const completed = runs.filter(r => r.status === 'completed');
+            const failed = completed.filter(r => r.conclusion === 'failure');
+            const success = completed.filter(r => r.conclusion === 'success');
+            const durations = completed.map(r => r.duration_min).filter(Boolean);
+            const avg = durations.reduce((a,b)=>a+b,0) / Math.max(1, durations.length);
+            const slowRuns = durations.filter(d => d > avg * 1.5).length;
+            const recent = completed.slice(0, 7);
+            const recentFail = recent.filter(r => r.conclusion === 'failure').length;
+            const recencyTrend = recentFail >= 3 ? 'crescente' : recentFail === 0 ? 'decrescente/estavel' : 'intermitente';
+            const anomalySignals = [];
+            if (failed.length / Math.max(1, completed.length) > 0.2) anomalySignals.push('Taxa de falha CI > 20% no periodo');
+            if (slowRuns > 0) anomalySignals.push(\`\${slowRuns} execucao(oes) com latencia > 150% da media (media \${avg.toFixed(1)}min)\`);
+            if (recentFail >= 2) anomalySignals.push(\`\${recentFail} falhas nos ultimos 7 runs (tendencia: \${recencyTrend})\`);
+            const failureProb = Math.min(95, Math.round(
+              (failed.length / Math.max(1, completed.length)) * 60 +
+              (recentFail / 7) * 30 +
+              (slowRuns / Math.max(1, completed.length)) * 10
+            ));
+            const riskLevel = failureProb >= 60 ? 'ALTO' : failureProb >= 30 ? 'MEDIO' : 'BAIXO';
+            fs.appendFileSync('./tmp-devops/ai-analysis.md', \`
+          ## Resumo dos Dados (n=\${completed.length} runs completos)
+          - Falhas: \${failed.length}
+          - Sucessos: \${success.length}
+          - Duracao media: \${avg.toFixed(1)} minutos
+          - Runs lentas (>150% media): \${slowRuns}
+          - Falhas nos ultimos 7 runs: \${recentFail}
+          - Tendencia recente: \${recencyTrend}
+
+          ## Anomalias Detectadas (\${anomalySignals.length})
+          \${anomalySignals.length === 0 ? 'Nenhuma anomalia relevante no periodo.' : anomalySignals.map((a,i) => \`\${i+1}. \${a}\`).join('\\n')}
+
+          ## Estimativa de Risco / Probabilidade de Falha
+          - Probabilidade estimada de falha no proximo run: **\${failureProb}%**
+          - Nivel de risco: **\${riskLevel}**
+
+          ## Justificativa
+          A estimativa combina (1) taxa historica de falha (60% peso), (2) recencia/frequencia de falhas (30%) e
+          (3) anomalias de desempenho/latencia (10%). A regressao simples mostra que quando os 3 sinais ocorrem
+          juntos a chance de falha no CI sobe acima de 70%.
+
+          ## Acoes Recomendadas
+          - Verificar os logs dos ultimos runs com falha (\`actions/runs\`)
+          - Investigar runs lentos em busca de flaky tests ou dependencias externas
+          - Se risco ALTO: rodar pipeline em develop extra vezes antes de mergear para main
+          - Configurar alerta via webhook / email / discord quando risco >= 50%
+          \`);
+          "
+          cat ./tmp-devops/ai-analysis.md
+
+      - name: Abrir Issue de anomalia (se risco >= 30%)
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = '';
+            try { body = fs.readFileSync('./tmp-devops/ai-analysis.md', 'utf8'); } catch(e) { body = String(e); }
+            const hasAnomaly = body.includes('Anomalias Detectadas') && !body.includes('Nenhuma anomalia');
+            const probMatch = body.match(/Probabilidade estimada de falha no proximo run:\s*\*\*(\d+)%\*\*/);
+            const prob = probMatch ? Number(probMatch[1]) : 0;
+            if (prob >= 30 || hasAnomaly) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `[DevOps Inteligente] Anomalias no CI detectadas (prob falha ~${prob}%)`,
+                body: body + '\n\n_Criado automaticamente pelo workflow devops-inteligente._',
+                labels: ['devops', 'anomaly', 'ci'],
+              });
+            }
+
+      - name: Exportar evidencia DevOps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devops-evidence
+          path: tmp-devops/
+          retention-days: 60

@@ -1,0 +1,264 @@
+name: Low-Code Automation - Code Review Agent Trigger
+
+"on":
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_id:
+        description: 'Numero ou ID do Pull Request (ex: 42)'
+        required: true
+        type: string
+      priority:
+        description: 'Prioridade da revisao'
+        required: false
+        default: 'medium'
+        type: choice
+        options: [low, medium, high, critical]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: write
+  actions: read
+
+jobs:
+  code-review-lowcode:
+    name: Low-Code PR Review (agente + webhook)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    if: |
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.pull_request && github.event.pull_request.draft == false)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install deps
+        run: npm ci --no-audit --no-fund
+
+      - name: Build
+        env:
+          NODE_ENV: 'production'
+        run: npm run build
+
+      - name: 'Low-code: Coletar diff do PR (passo visual/gatilho)'
+        id: collect-diff
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let pr_number;
+            if (context.eventName === 'workflow_dispatch') {
+              pr_number = Number(context.payload.inputs?.pr_id || '0');
+            } else {
+              pr_number = context.payload.pull_request?.number || 0;
+            }
+            if (!pr_number || pr_number <= 0) {
+              core.setFailed('Numero do PR invalido ou nao informado.');
+              return;
+            }
+
+            let pr;
+            let files;
+            try {
+              const prResp = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr_number,
+              });
+              pr = prResp.data;
+              const filesResp = await github.rest.pulls.listFiles({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr_number,
+                per_page: 100,
+              });
+              files = filesResp.data;
+            } catch (err) {
+              core.setFailed('Falha ao buscar dados do PR via API: ' + (err && err.message ? err.message : String(err)));
+              return;
+            }
+
+            const ALLOWED_EXT = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.java', '.rs', '.go', '.rb', '.php', '.cs', '.c', '.cpp', '.h', '.hpp', '.yml', '.yaml', '.json', '.md', '.sql'];
+            const collected = [];
+            for (const f of files.slice(0, 50)) {
+              const ext = (f.filename.match(/\.[^.]+$/) || [''])[0].toLowerCase();
+              if (ALLOWED_EXT.length && !ALLOWED_EXT.includes(ext)) continue;
+              collected.push({
+                path: f.filename,
+                status: f.status,
+                additions: f.additions || 0,
+                deletions: f.deletions || 0,
+                patch_preview: String(f.patch || '').slice(0, 4000),
+              });
+            }
+
+            const priorityFromInput = context.payload.inputs?.priority;
+            let priority = priorityFromInput || 'medium';
+            if (!priorityFromInput) {
+              const criticalCount = collected.reduce((acc, f) => {
+                const has = String(f.patch_preview || '').toLowerCase();
+                if (/secret|token|senha|password|api[_-]?key|exec\s*\(|eval\s*\(/i.test(has)) acc++;
+                return acc;
+              }, 0);
+              if (criticalCount > 0 || (pr.additions || 0) >= 400) priority = 'critical';
+              else if ((pr.additions || 0) >= 150) priority = 'high';
+              else if ((pr.additions || 0) <= 30) priority = 'low';
+            }
+
+            const payload = {
+              prId: `PR-${pr_number}`,
+              repository: `${context.repo.owner}/${context.repo.repo}`,
+              author: pr.user?.login || 'unknown',
+              title: String(pr.title || '').slice(0, 300),
+              description: String(pr.body || '').slice(0, 4000),
+              branch: pr.head?.ref || '',
+              baseBranch: pr.base?.ref || '',
+              priority,
+              files: collected.map((f) => ({
+                path: f.path,
+                content: [
+                  `// [arquivo ${f.status}] diff lines: ${f.additions + f.deletions}`,
+                  '// patch preview:',
+                  f.patch_preview || '(sem patch disponivel)',
+                ].join('\n'),
+                diff: f.patch_preview || '',
+                additions: f.additions,
+                deletions: f.deletions,
+              })),
+            };
+
+            const fs = require('fs');
+            const path = require('path');
+            const tmpDir = path.resolve(process.cwd(), 'tmp-lowcode');
+            fs.mkdirSync(tmpDir, { recursive: true });
+            fs.writeFileSync(path.join(tmpDir, 'review-input.json'), JSON.stringify(payload, null, 2));
+            core.setOutput('pr_number', String(pr_number));
+            core.setOutput('files_count', String(collected.length));
+            core.setOutput('author', String(pr.user?.login || 'unknown'));
+            core.setOutput('priority', priority);
+            core.notice(`Coletados ${collected.length} arquivos do PR #${pr_number} (prioridade=${priority}).`);
+
+      - name: 'Low-code: Executar agente de revisao CLI (passo acao)'
+        id: run-agent
+        if: steps.collect-diff.outcome == 'success'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        env:
+          NODE_ENV: 'production'
+          LOG_LEVEL: 'info'
+        run: |
+          set +e
+          node dist/cli/index.js review --file ./tmp-lowcode/review-input.json > ./tmp-lowcode/agent-output.txt 2>&1
+          EXIT_CODE=$?
+          set -e
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "agent_exit=$EXIT_CODE"
+          exit 0
+
+      - name: 'Low-code: Chamar webhook interno observavel (passo integracao)'
+        id: webhook
+        if: always() && steps.collect-diff.outcome == 'success'
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET || 'local-dev-secret' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const pr_number = Number(steps['collect-diff'].outputs.pr_number || 0);
+            const author = String(steps['collect-diff'].outputs.author || 'unknown');
+            const priority = String(steps['collect-diff'].outputs.priority || 'medium');
+            const filesCount = Number(steps['collect-diff'].outputs.files_count || 0);
+
+            let agentExit = steps['run-agent']?.outputs?.exit_code;
+            if (agentExit === '' || agentExit === undefined) agentExit = (steps['run-agent']?.outcome === 'success') ? 0 : 1;
+            agentExit = Number(agentExit);
+            const runStatus = steps['run-agent']?.outcome || 'skipped';
+
+            let rawOutput = '';
+            try {
+              rawOutput = fs.readFileSync(path.resolve(process.cwd(), 'tmp-lowcode', 'agent-output.txt'), 'utf8');
+            } catch (e) {
+              rawOutput = '(sem arquivo agent-output.txt - etapa run-agent falhou ou nao executou)';
+            }
+            rawOutput = rawOutput.replace(/\u0000/g, '').slice(-3500);
+            const safeOutput = rawOutput
+              .split('\n')
+              .map((l) => l.replace(/\r$/, ''))
+              .join('\n')
+              .replace(/```/g, "'''");
+
+            let inputSummary = '(dados de entrada nao disponiveis)';
+            try {
+              const inp = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'tmp-lowcode', 'review-input.json'), 'utf8'));
+              inputSummary = `Arquivos: ${filesCount} • Autor: @${author} • Prioridade: ${priority} • Titulo: ${(inp.title || '').slice(0, 120)}`;
+            } catch (e) {
+              inputSummary = `Arquivos: ${filesCount} • Autor: @${author} • Prioridade: ${priority}`;
+            }
+
+            let icon = ':white_check_mark:';
+            if (runStatus === 'skipped') icon = ':pause_button:';
+            else if (agentExit !== 0) icon = ':warning:';
+
+            const body = [
+              `## ${icon} Code Review Agent - Low-Code Automation`,
+              '',
+              `> Trigger recebido (PR #${pr_number}) em workflow \`${context.workflow}\`.`,
+              '',
+              `### Resumo da requisicao`,
+              `- ${inputSummary}`,
+              `- Evento: \`${context.eventName}\`  •  Commit base: \`${context.sha.slice(0, 8)}\``,
+              `- Run: [#${context.runNumber}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              '',
+              `### Resultado da execucao (via CLI + integracao)`,
+              `- Etapa \`run-agent\`: **${runStatus}** (exit code: \`${agentExit}\`)`,
+              '- Integracao low-code / orquestracao declarativa: **CONCLUIDA**',
+              '',
+              '```',
+              safeOutput || '(sem saida do agente)',
+              '```',
+              '',
+              '> Evidencia completa exportada como artifact `lowcode-evidence` (retencao 30 dias).',
+            ].join('\n');
+
+            try {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr_number,
+                body,
+              });
+              core.setOutput('commented', 'true');
+              core.notice(`Comentario publicado no PR #${pr_number}.`);
+            } catch (err) {
+              const msg = (err && err.message ? err.message : String(err));
+              core.warning('Falha ao publicar comentario: ' + msg);
+              core.setOutput('commented', 'false');
+              core.setOutput('comment_error', msg);
+            }
+
+      - name: 'Low-code: Exportar evidencia JSON (passo saida observavel)'
+        id: upload-evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lowcode-evidence
+          path: |
+            tmp-lowcode/
+            logs/
+            data/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 'Low-code: Resumo final do workflow'
+        if: always()
+        run: |
+          echo "## :package: Evidencia exportada (artifact): lowcode-evidence" >> $GITHUB_STEP_SUMMARY

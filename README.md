@@ -59,7 +59,7 @@ O mini-projeto (week 6) era um *assistente de análise de diffs com regras fixas
           └────────────────────┬─────────────────────┘
                                │
            ┌───────────────────▼───────────────────┐
-           │      PARALLEL_ANALYSIS  ⚡⚡           │  Promise.all:
+           │      PARALLEL_ANALYSIS                │  Promise.all:
            │  T1: carrega memoria historica        │    (a) MemoryStore
            │  T2: riscos preliminares paralelos    │    (b) risk preview
            └───────────────────┬───────────────────┘
@@ -378,8 +378,8 @@ Achados (11):
 
 | Artefato | Link (preencher antes do envio) |
 |----------|----------------------------------|
-| **Repositório no GitHub** (adicione o professor como colaborador — Settings → Collaborators → Add people) | `https://github.com/<SEU_USUARIO>/<SEU_REPOSITORIO>` |
-| **Quadro Kanban (GitHub Project)** — colunas Backlog / A Fazer / Em Andamento / Bloqueado / Em Revisão / Concluído | `https://github.com/users/<SEU_USUARIO>/projects/<NUMERO_DO_PROJECT>` |
+| **Repositório no GitHub** (adicione o professor como colaborador — Settings → Collaborators → Add people) | `https://github.com/Jardheson/code-review-agent-m2` |
+| **Quadro Kanban (GitHub Project)** — colunas Backlog / A Fazer / Em Andamento / Bloqueado / Em Revisão / Concluído | `https://github.com/users/Jardheson/projects/2/views/1` |
 | **Vídeo de demonstração (YouTube — não listado)**. Estrutura sugerida: 1) apresentação problema/arquitetura · 2) `npm run cli review --sample` · 3) cenário adversarial · 4) observabilidade (logs + audit com o mesmo `traceId`) · 5) workflows (ci, devops, low-code) aba Actions do GitHub. | `https://youtu.be/<ID_REAL_DO_VIDEO>` |
 
 ### 11.2 Organização do repositório e versionamento (5.3 + 5.4)

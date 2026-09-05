@@ -17,7 +17,8 @@
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "tool:server": "PORT=3001 STATIC_ANALYSIS_API_URL=\"\" tsx watch src/api/server.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

@@ -1,5 +1,4 @@
-## feature/langgraph-agente
+## feature/grafico-orquestracao
 - Node INPUT_VALIDATION, ADVERSARIAL_CHECK, STATIC_ANALYSIS, PARALLEL_ANALYSIS (Promise.all), LLM_ANALYSIS, AGGREGATE_RESULTS, RISK_ASSESSMENT, GENERATE_RECOMMENDATIONS, HUMAN_APPROVAL_CHECK, FINAL_REPORT
 - Edges condicionais: ADVERSARIAL_CHECK -> humanApprovalCheckPolicy; PARALLEL_ANALYSIS branch condicional para AGGREGATE_RESULTS
 - MaxStepsExceededError para evitar loops infinitos
-

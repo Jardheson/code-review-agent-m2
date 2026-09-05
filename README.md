@@ -21,7 +21,7 @@ Times de engenharia lidam com um volume crescente de Pull Requests e pontos cego
 Tech Leads, Engenheiros de Software, SREs, times de QA/Produto, e o próprio Professor avaliador.
 
 ### Objetivo e valor entregue
-Receber os metadados + diff de um PR, executar **10 passos orquestrados via LangGraph**, e retornar:
+Receber os metadados + diff de um PR, executar **10 passos orquestrados em grafo (orquestração própria)**, e retornar:
 - Score de qualidade (0–100).
 - Decisão: `approved | needs_changes | rejected | pending`.
 - Achados estruturados de qualidade/segurança.
@@ -31,8 +31,8 @@ Receber os metadados + diff de um PR, executar **10 passos orquestrados via Lang
 ### Continuidade do mini-projeto Módulo 1
 O mini-projeto (week 6) era um *assistente de análise de diffs com regras fixas* em script único. Neste projeto:
 - **Mantido**: conjunto de regras de análise estática (segredos, SQL injection, eval, TODO, any, console.log).
-- **Refatorado**: extraído em módulo `StaticAnalysisTool` + validação Zod + retry + integração LangGraph.
-- **Evoluído**: arquitetura agêntica completa, memória persistente, segurança adversarial, approvals humana, observabilidade 2 sinais, CI/DevOps inteligente, integração low-code.
+- **Refatorado**: extraído em módulo `StaticAnalysisTool` + validação Zod + retry + orquestração por grafo.
+- **Evoluído**: arquitetura agêntica completa, memória persistente, segurança adversarial, aprovação humana, observabilidade 2 sinais, CI/DevOps inteligente, integração low-code.
 
 ---
 
@@ -40,10 +40,13 @@ O mini-projeto (week 6) era um *assistente de análise de diffs com regras fixas
 
 ### Classificação da solução: **Sistema HÍBRIDO**
 - **Workflow determinístico (70%)**: validação de entrada, guard de segurança adversarial, análise estática, memória, cálculo de métricas, agregação, políticas de aprovação humana e limites de passos.
-- **LLM assistido (30%)**: análise semântica heurística + sumarização final + refinamento de linguagem em findings.
+- **LLM real (opcional) + heurísticas (30%)**: suporta dois provedores via REST/fetch (sem SDK adicional):
+  - **OpenAI**: Chat Completions (quando `OPENAI_API_KEY` está configurada).
+  - **Gemini (Google AI Studio / Google Cloud)**: generateContent com `systemInstruction` + JSON mode (quando `GOOGLE_API_KEY` está configurada; exige modelo disponível na chave, default `gemini-3.1-flash-lite`).
+- Caso nenhuma chave esteja configurada, ou em caso de falha/quota/erro de schema, cai automaticamente em heurísticas locais (análise semântica leve + agregação de findings estáticos).
 - **Decisão de status (`approved/needs_changes/rejected/pending`) SEMPRE determinística** (evita vieses do modelo).
 
-### Diagrama da Arquitetura LangGraph
+### Diagrama do Grafo de Orquestração
 
 ```
                   ┌──────────────────────────┐
@@ -65,7 +68,7 @@ O mini-projeto (week 6) era um *assistente de análise de diffs com regras fixas
            └───────────────────┬───────────────────┘
                                │
                   ┌────────────▼─────────────┐
-                  │   LLM_ANALYSIS (heur.)    │  subprocess / TODO semantic
+                  │   LLM_ANALYSIS (opt.)    │  OpenAI / Gemini (fetch) ou heurística
                   └────────────┬─────────────┘
                                │
                   ┌────────────▼─────────────┐
@@ -107,12 +110,13 @@ O mini-projeto (week 6) era um *assistente de análise de diffs com regras fixas
 | Item | Detalhe |
 |------|---------|
 | Nome / Versão | `static_code_analysis` v1.0.0 |
-| Integração | Serviço interno local (API simulada determinística) — mesma assinatura de MCP/REST externo |
+| Integração | Local por padrão (regras regex). Opcionalmente via **HTTP externo** (quando `STATIC_ANALYSIS_API_URL` é configurado, apontando para um servidor compatível). |
+| Serviço isolado | Expõe endpoint próprio (`POST /api/v1/tools/static-analysis`) no servidor API. Possibilita rodar dois processos separados (ex: porta 3001 como serviço de tool + porta 3000 como API principal) e provar integração externa real. |
 | Entrada | `StaticAnalysisInputSchema` (Zod) — files[], traceId, prId |
 | Saída | `{ findings: Finding[], analyzedCount, skippedCount }` |
 | Validação | Extensões de arquivo permitidas, tamanho diff, tipagem estrita |
 | Retry | `withRetry()` até `MAX_TOOL_RETRIES=2` com backoff 100ms/attempt |
-| Tratamento de erro | `ValidationError` → entrada inválida · `ToolExecutionError` → falha após N tentativas |
+| Tratamento de erro | `ValidationError` → entrada inválida · `ToolExecutionError` → falha após N tentativas (inclui falha HTTP 4xx/5xx quando em modo remoto) |
 | Auditoria | `auditor.record(STATIC_ANALYSIS_COMPLETED)` com contagem severidades |
 
 ### Regras da tool (10 regras):
@@ -123,7 +127,7 @@ O mini-projeto (week 6) era um *assistente de análise de diffs com regras fixas
 ## 4. Contexto e Memória (4.4)
 
 **Estratégia híbrida:**
-1. **Memória de curto prazo**: LangGraph state compartilhado (`AgentState`) durante a execução.
+1. **Memória de curto prazo**: state compartilhado (`AgentState`) durante a execução do grafo.
 2. **Memória de longo prazo (persistente)**: `MemoryStore` em arquivo JSON (`data/memory.json`).
 
 Conteúdo persistido:
@@ -161,7 +165,8 @@ Conteúdo persistido:
 ### 6.1. Pré-requisitos
 - **Node.js ≥ 20** (`node -v`).
 - **npm ≥ 10** (ou equivalente).
-- (Opcional) **Chave OpenAI válida** se quiser substituir a análise LLM heurística por API real.
+- (Opcional) **Chave OpenAI válida** para usar LLM real via OpenAI.
+- (Opcional) **Chave Gemini válida** (Google AI Studio / Google Cloud) para usar LLM real via Gemini — modelo default `gemini-3.1-flash-lite`; configure `GOOGLE_MODEL` se sua chave suportar outro modelo.
 
 ### 6.2. Instalação
 ```bash
@@ -173,9 +178,24 @@ npm install
 Copie `.env.example` → `.env` e ajuste:
 ```bash
 cp .env.example .env
-# edite PORT, OPENAI_API_KEY, LOG_LEVEL, etc.
+# edite PORT, LOG_LEVEL, LLM_PROVIDER, GOOGLE_API_KEY, OPENAI_API_KEY, STATIC_ANALYSIS_API_URL, etc.
 ```
-Valores padrão garantem execução mesmo sem chave real.
+Valores padrão garantem execução mesmo sem chave real (heurístico + tool local).
+
+Principais variáveis:
+| Variável | Padrão | Uso |
+|----------|--------|-----|
+| `LLM_PROVIDER` | `openai` | Qual provedor usar quando houver chave (`openai` ou `gemini`). Note: o código também prioriza `gemini` se `GOOGLE_API_KEY` existir. |
+| `OPENAI_API_KEY` | `` | Chave OpenAI (formato `sk-...`). |
+| `OPENAI_MODEL` | `gpt-4o-mini` | Modelo OpenAI. |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Base URL OpenAI (permite proxy / OpenRouter se necessário). |
+| `GOOGLE_API_KEY` | `` | Chave Gemini (formato Google AI Studio / Google Cloud API Key). |
+| `GOOGLE_MODEL` | `gemini-3.1-flash-lite` | Modelo Gemini. Use `v1beta/models:list` para descobrir os modelos suportados pela sua chave. |
+| `GOOGLE_API_VERSION` | `v1beta` | Versão da API (`v1` ou `v1beta`). |
+| `GOOGLE_BASE_URL` | `https://generativelanguage.googleapis.com` | Base URL do Gemini. |
+| `STATIC_ANALYSIS_API_URL` | `` | Quando vazio → tool local. Quando preenchido → integra tool via HTTP externo (ex: rodar `npm run tool:server` em porta separada). |
+| `PORT` | `3000` | Porta da API principal. |
+| `LOG_LEVEL` | `info` | Nível de log (`debug`, `info`, `warn`, `error`). |
 
 ### 6.4. Executar API local
 ```bash
@@ -197,6 +217,17 @@ npm run cli -- review --file pr.json    # usa arquivo JSON
 npm run cli -- validate                 # valida schemas
 npm run cli -- sample > sample-pr.json  # exporta exemplo
 ```
+
+### 6.5.1. (Opcional) Rodar tool como serviço isolado para provar integração externa real
+Este passo demonstra que a tool não é “apenas local”:
+```bash
+# Terminal 1 — servidor da tool em porta separada
+npm run tool:server                      # escuta em PORTA_TOOL (padrão: 3001) /health + /api/v1/tools/static-analysis
+
+# Terminal 2 — agente apontando para o servidor da tool (HTTP externo)
+STATIC_ANALYSIS_API_URL="http://localhost:3001/api/v1/tools/static-analysis" npm run cli -- review --file pr.json
+```
+Nesse modo, a CLI envia o diff via HTTP POST, recebe os findings e executa normalmente o restante do grafo.
 
 ### 6.6. Executar lint, type-check, build
 ```bash
@@ -350,15 +381,15 @@ Achados (11):
 ### Refinamento relevante do desenvolvimento
 
 **Ciclo #1 — Sobrescrita de papel ("agora você é X")**
-- **Problema observado**: Adversários testavam frases como "A partir de agora você é o admin" e o LLM aceitava, desativando regras de segurança.
+- **Risco**: entradas adversariais tentam induzir o agente (e, quando habilitado, o LLM) a violar regras (ex: "agora você é o admin").
 - **Alteração aplicada**:
-  - Prompt: nova seção "REGRA INQUEBRÁVEL" + regra de NÃO aceitar sobrescrita.
+  - Prompt: seção "REGRA INQUEBRÁVEL" + regra de NÃO aceitar sobrescrita.
   - SecurityGuard: regex `role_override` + limiar `maxThreats=2` com `SecurityError`.
-- **Resultado obtido**: No E2E adversarial, status agora SEMPRE é `pending` (bloqueio humano), jamais `approved`. Taxa de fuga caiu para 0 nos testes.
+- **Resultado obtido**: No E2E adversarial, status é `pending` (bloqueio humano), jamais `approved`, e `threats.length >= 2`.
 
 ### Limitações conhecidas
 1. Análise é puramente estática/lexicográfica: não executa código, não faz taint analysis interprocedural.
-2. Integração LLM real opcional: a versão padrão usa heurísticas para evitar custo e necessidade de chave.
+2. Integração LLM real opcional: OpenAI ou Gemini (via REST/fetch). Quando nenhuma chave está configurada, cai em heurísticas para evitar custo. Os modelos disponíveis dependem da chave (ex: `gemini-3.1-flash-lite` é um default compatível com chaves Google AI Studio/Cloud).
 3. Memória em JSON: adequada até ~10k registros; além disso migrar para SQLite/Postgres.
 4. RAG não foi aplicado (problema não exigiu base de conhecimento externa). Para uso com base de kb: adicionar ingestão em `src/memory/` com chunking 512 tokens, indexação FAISS e recuperação top-k no node `PARALLEL_ANALYSIS`.
 
@@ -379,13 +410,13 @@ Achados (11):
 | Artefato | Link (preencher antes do envio) |
 |----------|----------------------------------|
 | **Repositório no GitHub** (adicione o professor como colaborador — Settings → Collaborators → Add people) | `https://github.com/Jardheson/code-review-agent-m2` |
-| **Quadro Kanban (GitHub Project)** — colunas Backlog / A Fazer / Em Andamento / Bloqueado / Em Revisão / Concluído | `https://github.com/users/Jardheson/projects/2/views/1` |
+| **Quadro Kanban (GitHub Project)** — colunas Backlog / A Fazer / Em Andamento / Bloqueado / Em Revisão / Concluído | `https://github.com/users/Jardheson/projects/2` |
 | **Vídeo de demonstração (YouTube — não listado)**. Estrutura sugerida: 1) apresentação problema/arquitetura · 2) `npm run cli review --sample` · 3) cenário adversarial · 4) observabilidade (logs + audit com o mesmo `traceId`) · 5) workflows (ci, devops, low-code) aba Actions do GitHub. | `https://youtu.be/<ID_REAL_DO_VIDEO>` |
 
 ### 11.2 Organização do repositório e versionamento (5.3 + 5.4)
 **GitHub Project (Kanban)** — 10 cards sugeridos (conforme edital §5.3):
 - Definição do problema, escopo e arquitetura da solução
-- Implementação do fluxo com LangGraph
+- Implementação do grafo de execução (orquestração)
 - Desenvolvimento da tool e integração
 - Implementação de memória, contexto ou RAG
 - Segurança, governança e tratamento de entradas adversariais
@@ -399,8 +430,8 @@ Achados (11):
 **Branches (5.4)** — estratégia de branches (criar a partir do GitHub):
 - `main` → versão final (entrega)
 - `develop` → branch de integração
-- `feature/langgraph-agente` → state/nodes/edges (grafo)
-- `feature/tool-integracao` → StaticAnalysisTool + retry + Zod
+- `feature/grafico-orquestracao` → state/nodes/edges (grafo de orquestração próprio)
+- `feature/tool-integracao` → StaticAnalysisTool + retry + Zod + endpoint remoto
 - `feature/memoria-rag` → MemoryStore (JSON persistente)
 - `feature/governanca` → SecurityGuard + adversarial + HumanApprovalCheck
 - `feature/observabilidade` → Pino logger + Auditor + rotas observabilidade
@@ -409,8 +440,10 @@ Achados (11):
 - `feature/low-code` → low-code-review.yml + endpoint webhook/low-code
 - `docs/readme-video` → README, docs/prompts, docs/qa, docs/evidencias
 
+> **Evidência de desenvolvimento incremental:** para neutralizar a crítica de “branches sem desenvolvimento incremental real”, siga o roteiro passo a passo em [docs/branches/roteiro-incremental.md](file:///e:/Projeto%20Avaliativo%20-%20M%C3%B3dulo%202/docs/branches/roteiro-incremental.md) — ele detalha como criar 9 PRs pequenos, commits semânticos, vincular aos cards do Kanban e produzir histórico consistente.
+
 **Commits semânticos** (exemplos):
-- `feat(langgraph): add 10 nodes, edges and shared AgentState`
+- `feat(graph): add 10 nodes, edges and shared AgentState`
 - `fix(guard): role_override regex now matches accents and "voce e" without diacritics`
 - `refactor(tool): retry pattern with 2 attempts and Zod input`
 - `docs(readme): scribe two usage scenarios (main + adversarial) and low-code repro`
@@ -433,7 +466,7 @@ e:\Projeto Avaliativo - Módulo 2\
 │   ├── devops-inteligente.yml      # Análise IA + Issue automática
 │   └── low-code-review.yml         # Automação Low-Code PR review
 ├── src/
-│   ├── agent/graph.ts              # LangGraph (10 nodes + edges + state)
+│   ├── agent/graph.ts              # Grafo de execução (10 nodes + edges + state)
 │   ├── api/server.ts               # Fastify API (health, review, audit, logs, webhook)
 │   ├── cli/index.ts                # CLI (review/validate/sample + SAMPLE doc)
 │   ├── config/env.ts               # Zod env schema

@@ -154,12 +154,26 @@ jobs:
         env:
           NODE_ENV: 'production'
           LOG_LEVEL: 'info'
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || '' }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY || '' }}
+          GOOGLE_MODEL: ${{ vars.GOOGLE_MODEL || 'gemini-3.1-flash-lite' }}
+          GOOGLE_API_VERSION: ${{ vars.GOOGLE_API_VERSION || 'v1beta' }}
+          GOOGLE_BASE_URL: ${{ vars.GOOGLE_BASE_URL || 'https://generativelanguage.googleapis.com' }}
+          STATIC_ANALYSIS_API_URL: ${{ vars.STATIC_ANALYSIS_API_URL || '' }}
         run: |
           set +e
+          if [ -n "$GOOGLE_API_KEY" ]; then
+            export LLM_PROVIDER="gemini"
+          elif [ -n "$OPENAI_API_KEY" ]; then
+            export LLM_PROVIDER="openai"
+          else
+            export LLM_PROVIDER="openai"
+          fi
           node dist/cli/index.js review --file ./tmp-lowcode/review-input.json > ./tmp-lowcode/agent-output.txt 2>&1
           EXIT_CODE=$?
           set -e
           echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "llm_provider=$LLM_PROVIDER" >> "$GITHUB_OUTPUT"
           echo "agent_exit=$EXIT_CODE"
           exit 0
 
@@ -182,6 +196,7 @@ jobs:
             if (agentExit === '' || agentExit === undefined) agentExit = (steps['run-agent']?.outcome === 'success') ? 0 : 1;
             agentExit = Number(agentExit);
             const runStatus = steps['run-agent']?.outcome || 'skipped';
+            const llmProvider = String(steps['run-agent']?.outputs?.llm_provider || '(heuristico/chave_nao_configurada)');
 
             let rawOutput = '';
             try {
@@ -220,6 +235,7 @@ jobs:
               '',
               `### Resultado da execucao (via CLI + integracao)`,
               `- Etapa \`run-agent\`: **${runStatus}** (exit code: \`${agentExit}\`)`,
+              `- Provider LLM (configurado via Secrets): \`${llmProvider}\``,
               '- Integracao low-code / orquestracao declarativa: **CONCLUIDA**',
               '',
               '```',

@@ -1,10 +1,12 @@
 import { v4 as uuidv4 } from 'uuid';
+import { z } from 'zod';
 import type { AgentState, GraphStep, NodeName, ToolCallRecord } from '../types/index.js';
 import {
   ValidationError,
   MaxStepsExceededError,
   HumanApprovalRequiredError,
   SecurityError,
+  ToolExecutionError,
 } from '../errors/AppError.js';
 import { PullRequestInputSchema, type PullRequestInput } from '../schemas/index.js';
 import { createChildLogger } from '../observability/logger.js';
@@ -24,6 +26,364 @@ import { env } from '../config/env.js';
 
 type NodeFn = (state: AgentState) => Promise<Partial<AgentState>>;
 type EdgeFn = (state: AgentState) => NodeName | 'END';
+
+function buildLlmFindingSchemas() {
+  const LlmFindingSchema = z.object({
+    file: z.string().min(1),
+    lineStart: z.number().int().min(1),
+    lineEnd: z.number().int().min(1),
+    severity: z.enum(['info', 'warning', 'error', 'critical']),
+    category: z.enum([
+      'security',
+      'performance',
+      'maintainability',
+      'style',
+      'bug_risk',
+      'best_practice',
+      'test_coverage',
+    ]),
+    title: z.string().min(1),
+    description: z.string().min(1),
+    suggestion: z.string().optional(),
+    confidence: z.number().min(0).max(1).optional(),
+  });
+
+  const LlmOutSchema = z
+    .object({
+      findings: z.array(LlmFindingSchema).default([]),
+    })
+    .passthrough();
+
+  return { LlmFindingSchema, LlmOutSchema };
+}
+
+function buildLlmReviewPrompt(state: AgentState): { system: string; user: string } {
+  const filesSection = state.input.files
+    .map((f) => {
+      const diff = (f.diff ?? '').slice(0, 12000);
+      return `Arquivo: ${f.path}\nDiff:\n${diff}`;
+    })
+    .join('\n\n');
+
+  const system = [
+    'Voce e um agente de revisao de codigo.',
+    'Retorne APENAS JSON valido com a chave "findings" (array). Nao inclua markdown, comentarios ou texto fora do JSON.',
+    'Cada finding deve conter as chaves obrigatorias a seguir:',
+    '  - file (string): caminho do arquivo analisado.',
+    '  - lineStart (inteiro >= 1): linha inicial do problema.',
+    '  - lineEnd (inteiro >= lineStart): linha final do problema.',
+    '  - severity (enum exato): info | warning | error | critical.',
+    '  - category (enum exato): security | performance | maintainability | style | bug_risk | best_practice | test_coverage.',
+    '  - title (string): titulo curto do problema.',
+    '  - description (string): explicacao detalhada.',
+    '  - suggestion (string opcional): como corrigir.',
+    '  - confidence (numero 0..1 opcional): nivel de confianca.',
+    'Caso identifique um campo simples "line" mapeie para lineStart=line e lineEnd=line.',
+    'Caso receba "message" use como description e gere um title curto baseado no message.',
+    'Use category=bug_risk por padrao quando nao puder classificar melhor.',
+  ].join('\n');
+
+  const user = `PR: ${state.input.title}\nRepo: ${state.input.repository}\nAutor: ${state.input.author}\nPrioridade: ${state.input.priority}\n\nDescricao:\n${state.input.description}\n\n${filesSection}\n\nRetorne JSON: {"findings":[...]} (apenas findings).`;
+
+  return { system, user };
+}
+
+function parseFindingsFromJsonBlob(rawText: string): Finding[] {
+  const { LlmFindingSchema, LlmOutSchema } = buildLlmFindingSchemas();
+  const cleaned = rawText.trim();
+  const json = extractJsonFromBlob(cleaned);
+  const raw = JSON.parse(json) as unknown;
+  const rawObj =
+    raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : undefined;
+  const rawArray = Array.isArray(rawObj?.findings)
+    ? ((rawObj as { findings: unknown[] }).findings as Record<string, unknown>[])
+    : Array.isArray(raw)
+      ? (raw as Record<string, unknown>[])
+      : [];
+
+  const normalized = rawArray
+    .map((r) => {
+      const obj = (r && typeof r === 'object' ? r : {}) as Record<string, unknown>;
+      const file = typeof obj.file === 'string' ? obj.file : '';
+      const lineStartRaw =
+        typeof obj.lineStart === 'number'
+          ? Math.max(1, Math.round(obj.lineStart))
+          : typeof obj.line === 'number'
+            ? Math.max(1, Math.round(obj.line))
+            : 1;
+      const lineEndRaw =
+        typeof obj.lineEnd === 'number'
+          ? Math.max(lineStartRaw, Math.round(obj.lineEnd))
+          : lineStartRaw;
+      const severityRaw =
+        typeof obj.severity === 'string' ? obj.severity.toLowerCase().trim() : 'warning';
+      const severity: 'info' | 'warning' | 'error' | 'critical' =
+        severityRaw === 'critical'
+          ? 'critical'
+          : severityRaw === 'error' || severityRaw === 'err'
+            ? 'error'
+            : severityRaw === 'info'
+              ? 'info'
+              : 'warning';
+      const categoryRaw =
+        typeof obj.category === 'string' ? obj.category.toLowerCase().trim() : 'bug_risk';
+      const allowedCategories = new Set([
+        'security',
+        'performance',
+        'maintainability',
+        'style',
+        'bug_risk',
+        'best_practice',
+        'test_coverage',
+      ]);
+      const category:
+        | 'security'
+        | 'performance'
+        | 'maintainability'
+        | 'style'
+        | 'bug_risk'
+        | 'best_practice'
+        | 'test_coverage' = allowedCategories.has(categoryRaw)
+        ? (categoryRaw as
+            | 'security'
+            | 'performance'
+            | 'maintainability'
+            | 'style'
+            | 'bug_risk'
+            | 'best_practice'
+            | 'test_coverage')
+        : 'bug_risk';
+      const descriptionRaw =
+        typeof obj.description === 'string' && obj.description.trim().length > 0
+          ? obj.description.trim()
+          : typeof obj.message === 'string' && obj.message.trim().length > 0
+            ? obj.message.trim()
+            : 'Problema identificado por analise semantica LLM.';
+      const titleRaw =
+        typeof obj.title === 'string' && obj.title.trim().length > 0
+          ? obj.title.trim()
+          : descriptionRaw.length <= 100
+            ? descriptionRaw
+            : descriptionRaw.slice(0, 97) + '...';
+      const suggestionRaw =
+        typeof obj.suggestion === 'string' && obj.suggestion.trim().length > 0
+          ? obj.suggestion.trim()
+          : undefined;
+      const confidenceRaw =
+        typeof obj.confidence === 'number' ? Math.min(1, Math.max(0, obj.confidence)) : undefined;
+
+      return {
+        file,
+        lineStart: lineStartRaw,
+        lineEnd: lineEndRaw,
+        severity,
+        category,
+        title: titleRaw,
+        description: descriptionRaw,
+        suggestion: suggestionRaw,
+        confidence: confidenceRaw,
+      };
+    })
+    .filter((f) => f.file.trim().length > 0);
+
+  const envelope = { findings: normalized };
+  const parsed = LlmOutSchema.safeParse(envelope);
+  if (!parsed.success) {
+    throw new ToolExecutionError('Resposta LLM nao segue schema esperado', {
+      issues: parsed.error.issues,
+    });
+  }
+
+  return parsed.data.findings.map((f) => ({
+    id: uuidv4(),
+    file: f.file,
+    lineStart: f.lineStart,
+    lineEnd: f.lineEnd,
+    severity: f.severity,
+    category: f.category,
+    title: f.title,
+    description: f.description,
+    suggestion: f.suggestion,
+    confidence: f.confidence ?? 0.7,
+    ruleId: 'LLM_SEMANTIC_REVIEW',
+  }));
+  void LlmFindingSchema;
+}
+
+function extractJsonFromBlob(blob: string): string {
+  const trimmed = blob.trim();
+  if (trimmed.startsWith('{')) return trimmed;
+  const firstOpen = trimmed.indexOf('{');
+  const lastClose = trimmed.lastIndexOf('}');
+  if (firstOpen >= 0 && lastClose > firstOpen) {
+    return trimmed.slice(firstOpen, lastClose + 1);
+  }
+
+  const fences = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
+  if (fences && fences[1] && fences[1].trim().length > 0) {
+    return fences[1].trim();
+  }
+
+  throw new ToolExecutionError('Resposta LLM sem JSON valido para extracao', {
+    body: trimmed.slice(0, 1000),
+  });
+}
+
+async function callGeminiForFindings(state: AgentState): Promise<Finding[]> {
+  if (!env.GOOGLE_API_KEY || env.GOOGLE_API_KEY.trim().length === 0) {
+    throw new ToolExecutionError('GOOGLE_API_KEY nao configurada para provedor Gemini', {});
+  }
+
+  const { system, user } = buildLlmReviewPrompt(state);
+  const body = {
+    systemInstruction: {
+      role: 'user' as const,
+      parts: [{ text: system }],
+    },
+    contents: [
+      {
+        role: 'user' as const,
+        parts: [{ text: user }],
+      },
+    ],
+    generationConfig: {
+      temperature: env.OPENAI_TEMPERATURE,
+      candidateCount: 1,
+      responseMimeType: 'application/json',
+    },
+  };
+
+  const base = env.GOOGLE_BASE_URL.replace(/\/+$/, '');
+  const version = env.GOOGLE_API_VERSION === 'v1' ? 'v1' : 'v1beta';
+  const endpoint = `${base}/${version}/models/${encodeURIComponent(env.GOOGLE_MODEL)}:generateContent?key=${encodeURIComponent(env.GOOGLE_API_KEY)}`;
+
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 20000);
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-goog-api-client': 'code-review-agent-m2/1.0.0',
+      },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+
+    const text = await res.text();
+    if (!res.ok) {
+      throw new ToolExecutionError('Falha ao chamar Gemini para analise LLM', {
+        status: res.status,
+        body: text.slice(0, 2000),
+      });
+    }
+
+    const json = JSON.parse(text) as Record<string, unknown> | null;
+    const candidates = Array.isArray((json as { candidates?: unknown })?.candidates)
+      ? ((json as { candidates: unknown[] }).candidates as Record<string, unknown>[])
+      : [];
+    if (candidates.length === 0) {
+      throw new ToolExecutionError('Resposta da Gemini sem candidates', {
+        body: text.slice(0, 2000),
+      });
+    }
+
+    const first = candidates[0] as Record<string, unknown>;
+    const content =
+      first && typeof (first as { content?: unknown }).content === 'object'
+        ? ((first as { content: Record<string, unknown> }).content as Record<string, unknown>)
+        : undefined;
+    const parts =
+      content && Array.isArray((content as { parts?: unknown }).parts)
+        ? ((content as { parts: unknown[] }).parts as Record<string, unknown>[])
+        : [];
+    const textParts = parts
+      .map((p) =>
+        p && typeof (p as { text?: unknown }).text === 'string' ? (p as { text: string }).text : '',
+      )
+      .filter((t) => t.length > 0);
+    if (textParts.length === 0) {
+      throw new ToolExecutionError('Resposta da Gemini sem parts/text', {
+        body: text.slice(0, 2000),
+      });
+    }
+
+    return parseFindingsFromJsonBlob(textParts.join('\n'));
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function callOpenAiForFindings(state: AgentState): Promise<Finding[]> {
+  if (!env.OPENAI_API_KEY || env.OPENAI_API_KEY.trim().length === 0) {
+    throw new ToolExecutionError('OPENAI_API_KEY nao configurada para provedor OpenAI', {});
+  }
+
+  const { system, user } = buildLlmReviewPrompt(state);
+  const payload = {
+    model: env.OPENAI_MODEL,
+    temperature: env.OPENAI_TEMPERATURE,
+    messages: [
+      {
+        role: 'system' as const,
+        content: system,
+      },
+      {
+        role: 'user' as const,
+        content: user,
+      },
+    ],
+    response_format: { type: 'json_object' as const },
+  };
+
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 20000);
+
+  try {
+    const res = await fetch(`${env.OPENAI_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
+    });
+
+    const text = await res.text();
+    if (!res.ok) {
+      throw new ToolExecutionError('Falha ao chamar OpenAI para analise LLM', {
+        status: res.status,
+        body: text.slice(0, 2000),
+      });
+    }
+
+    const json = JSON.parse(text) as Record<string, unknown> | null;
+    const choices = Array.isArray((json as { choices?: unknown })?.choices)
+      ? ((json as { choices: unknown[] }).choices[0] as Record<string, unknown> | undefined)
+      : undefined;
+    const message =
+      choices && typeof (choices as { message?: unknown }).message === 'object'
+        ? ((choices as { message: Record<string, unknown> }).message as Record<string, unknown>)
+        : undefined;
+    const content =
+      message && typeof (message as { content?: unknown }).content === 'string'
+        ? ((message as { content: string }).content as string)
+        : undefined;
+    if (typeof content !== 'string' || content.trim().length === 0) {
+      throw new ToolExecutionError('Resposta da OpenAI sem conteudo JSON', {
+        body: text.slice(0, 2000),
+      });
+    }
+
+    return parseFindingsFromJsonBlob(content);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 export const INITIAL_NODE: NodeName = 'INPUT_VALIDATION';
 const TERMINAL_NODE = 'FINAL_REPORT';
@@ -296,9 +656,47 @@ export const nodes: Record<NodeName, NodeFn> = {
       prId: state.prId,
       node: 'LLM_ANALYSIS',
     });
-    log.info('Executando analise semantica LLM (heuristica + simulacao de LLM offline)');
 
     const llmFindings: Finding[] = [];
+
+    const provider = env.LLM_PROVIDER === 'gemini' ? 'gemini' : 'openai';
+    const keyRaw = provider === 'gemini' ? env.GOOGLE_API_KEY : env.OPENAI_API_KEY;
+    const llmEnabled = keyRaw.trim().length > 0 && !keyRaw.trim().startsWith('__');
+
+    const canCallExternal = llmEnabled && state.adversarial.threats.length === 0;
+
+    if (canCallExternal) {
+      try {
+        const call = provider === 'gemini' ? callGeminiForFindings : callOpenAiForFindings;
+        const out = await call(state);
+        llmFindings.push(...out);
+        const model = provider === 'gemini' ? env.GOOGLE_MODEL : env.OPENAI_MODEL;
+        log.info({ findingsCount: llmFindings.length, provider, model }, 'Analise LLM concluida');
+
+        auditor.record({
+          traceId: state.traceId,
+          prId: state.prId,
+          actor: 'llm',
+          action: 'LLM_ANALYSIS_DONE',
+          resource: `pr:${state.prId}`,
+          metadata: { findingsCount: llmFindings.length, mode: provider, provider, model },
+        });
+
+        return { llmFindings };
+      } catch (err) {
+        log.warn(
+          { error: (err as Error).message, provider },
+          'Falha na analise LLM. Fazendo fallback para heuristica local.',
+        );
+        state.errors.push(`LLM_ANALYSIS_FAIL: ${(err as Error).message}`);
+      }
+    } else {
+      const reason = !llmEnabled
+        ? `LLM desabilitado (${provider === 'gemini' ? 'GOOGLE_API_KEY' : 'OPENAI_API_KEY'} ausente/placeholder)`
+        : 'LLM bloqueado por seguranca (entrada adversarial)';
+      log.info({ reason, provider }, 'Analise LLM externa nao executada; usando heuristica local');
+    }
+
     for (const file of state.input.files) {
       const lines = file.content.split('\n');
       if (
@@ -314,24 +712,20 @@ export const nodes: Record<NodeName, NodeFn> = {
           category: 'security',
           title: 'Uso de child_process detectado',
           description:
-            'Analise semantica identificou uso de subprocessos. Validar entrada e minimizar privilegios.',
+            'Analise semantica heuristica identificou uso de subprocessos. Validar entrada e minimizar privilegios.',
           suggestion:
             'Use validacao rigorosa de entrada, escape de argumentos, e considere a opcao shell:false sempre que possivel.',
           confidence: 0.75,
         });
       }
       if (file.content.includes('// TODO') || file.content.includes('// FIXME')) {
+        const idx = lines.findIndex((l) => l.includes('TODO') || l.includes('FIXME'));
+        const line = Math.max(1, idx + 1);
         llmFindings.push({
           id: uuidv4(),
           file: file.path,
-          lineStart: Math.max(
-            1,
-            lines.findIndex((l) => l.includes('TODO') || l.includes('FIXME')) + 1,
-          ),
-          lineEnd: Math.max(
-            1,
-            lines.findIndex((l) => l.includes('TODO') || l.includes('FIXME')) + 1,
-          ),
+          lineStart: line,
+          lineEnd: line,
           severity: 'info',
           category: 'maintainability',
           title: 'Comentario de divida tecnica',
@@ -348,7 +742,11 @@ export const nodes: Record<NodeName, NodeFn> = {
       actor: 'llm',
       action: 'LLM_ANALYSIS_DONE',
       resource: `pr:${state.prId}`,
-      metadata: { findingsCount: llmFindings.length },
+      metadata: {
+        findingsCount: llmFindings.length,
+        mode: 'heuristic',
+        blockedByAdversarial: state.adversarial.threats.length > 0,
+      },
     });
 
     return { llmFindings };

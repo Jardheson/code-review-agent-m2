@@ -41,7 +41,7 @@ O edital aceita CLI, API local, interface simples ou aplicação integrada. O pr
   - Backlog · A Fazer · Em Andamento · Bloqueado · Em Revisão · Concluído.
 - **Cards (conforme §5.3):**
   1. Definição do problema, escopo e arquitetura da solução
-  2. Implementação do fluxo com LangGraph
+  2. Implementação do grafo de execução (orquestração)
   3. Desenvolvimento da tool e integração
   4. Implementação de memória, contexto ou RAG
   5. Segurança, governança e tratamento de entradas adversariais
@@ -59,7 +59,7 @@ O edital aceita CLI, API local, interface simples ou aplicação integrada. O pr
   - `main` → versão final e funcional (entrega)
   - `develop` → branch de integração
   - Feature branches a partir da develop:
-    - `feature/langgraph-agente`
+    - `feature/grafico-orquestracao`
     - `feature/tool-integracao`
     - `feature/memoria-rag`
     - `feature/governanca`
@@ -69,7 +69,7 @@ O edital aceita CLI, API local, interface simples ou aplicação integrada. O pr
     - `feature/low-code`
     - `docs/readme-video`
 - **Commits semânticos (exemplos):**
-  - `feat(langgraph): add 10 nodes, edges and shared AgentState`
+  - `feat(graph): add 10 nodes, edges and shared AgentState`
   - `fix(guard): role_override regex now matches accents and "voce e" without diacritics`
   - `refactor(tool): retry pattern with 2 attempts and Zod input`
   - `docs(readme): scribe two usage scenarios (main + adversarial) and low-code repro`
@@ -81,7 +81,7 @@ O edital aceita CLI, API local, interface simples ou aplicação integrada. O pr
 
 ---
 
-## Requisito 4.2 — LangGraph: estado, nodes, edges, paralelização, branching
+## Requisito 4.2 — Grafo de execução: estado, nodes, edges, paralelização, branching
 
 Implementação: [src/agent/graph.ts](file:///e:/Projeto%20Avaliativo%20-%20M%C3%B3dulo%202/src/agent/graph.ts)
 
@@ -119,7 +119,11 @@ Implementação: [src/tools/staticAnalysisTool.ts](file:///e:/Projeto%20Avaliati
 - `withRetry()` com `MAX_TOOL_RETRIES=2` + backoff exponencial (100ms * attempt).
 - Lança `ToolExecutionError` após N tentativas falhas (registrado em `state.toolCalls`).
 
-**Ações destrutivas:** Esta tool é READ-ONLY, não executa escrita em disco, rede, banco. Aprovação humana não aplicável.
+**Ações destrutivas:** Esta tool é READ-ONLY sobre o código analisado (não escreve em repo/banco). Ela funciona em **dois modos** (configurável por env):
+- **Modo local (padrão)**: `STATIC_ANALYSIS_API_URL` vazio → regras regex locais.
+- **Modo HTTP externo (prova integração externa real)**: `STATIC_ANALYSIS_API_URL` aponta para um servidor que expõe `POST /api/v1/tools/static-analysis` (o próprio app principal já implementa esse endpoint, permitindo rodar dois processos separados: `npm run tool:server` em porta 3001 + API/CLI em porta 3000 com `STATIC_ANALYSIS_API_URL` apontando para 3001).
+Quando em modo remoto: lança `ToolExecutionError` após N tentativas com falha HTTP (4xx/5xx).
+Aprovação humana não aplicável.
 
 ---
 
@@ -238,9 +242,15 @@ Implementação: [.github/workflows/low-code-review.yml](file:///e:/Projeto%20Av
 
 Ver pasta: [docs/prompts/README.md](file:///e:/Projeto%20Avaliativo%20-%20M%C3%B3dulo%202/docs/prompts/README.md)
 
-**Modelo configurável por env:** `OPENAI_MODEL` (default `gpt-4o-mini`).
-**Key via env:** `OPENAI_API_KEY` (nunca commitada).
-**Ciclos de refinamento documentados:** 2 ciclos (sobrescrita de papel / recomendações genéricas).
+**Modelo configurável por env:**
+- OpenAI: `OPENAI_MODEL` (default `gpt-4o-mini`) via `OPENAI_API_KEY`.
+- Gemini (Google AI Studio / Google Cloud): `GOOGLE_MODEL` (default `gemini-3.1-flash-lite`, suportado em chaves Google; descubra modelos suportados pela sua chave via `GET {GOOGLE_BASE_URL}/{GOOGLE_API_VERSION}/models?key=...`) — ativado quando `GOOGLE_API_KEY` está configurado.
+- **Base URLs / versões customizáveis**: `OPENAI_BASE_URL`, `GOOGLE_BASE_URL`, `GOOGLE_API_VERSION`.
+- **Fallback heurístico**: quando nenhuma chave está configurada, ou ocorre erro de rede/quota/4xx, ou a resposta do modelo não segue schema de findings, o grafo automaticamente usa heurísticas locais para não quebrar o fluxo.
+- **Segurança / bloqueio externo**: quando o guard detecta ameaças adversariais (`adversarial.threats.length > 0`), a chamada externa é bloqueada e o sistema segue por heurística/local.
+
+**Key via env:** `OPENAI_API_KEY` e `GOOGLE_API_KEY` (nunca commitadas; `.env` no `.gitignore`).
+**Ciclos de refinamento documentados:** 2 ciclos (sobrescrita de papel / recomendações genéricas) e normalização de JSON (mapeia campos simplificados `line` / `message` para `lineStart`, `lineEnd`, `title`, `description`).
 
 ---
 

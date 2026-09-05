@@ -13,10 +13,11 @@ manutenibilidade e boas práticas, produzindo um relatório estruturado, acioná
 ## Classificação da solução
 Sistema HÍBRIDO:
 - Workflow determinístico: validação de entrada, análise estática, auditoria, cálculo de métricas,
-  agregação, políticas de aprovação e limites de passos (LangGraph com edges explícitas).
-- Decisões assistidas por LLM: sumarização semântica, descrição de achados complexos, sugestões
-  contextuais de teste e refinamento de linguagem natural do relatório final.
-- Modelo SEMPRE deve respeitar as regras deterministicamente calculadas (score, severity, policy).
+  agregação, políticas de aprovação e limites de passos (grafo/estado com edges explícitas).
+- Decisões assistidas por LLM (opcional): análise semântica, descrição de achados complexos,
+  sugestões contextuais de teste e refinamento de linguagem natural do relatório final.
+- Se o LLM não estiver configurado (ex: OPENAI_API_KEY ausente), o sistema usa heurísticas locais
+  e mantém a decisão final determinística (score, severity, policy).
 
 ## Formato de saída do LLM
 Sempre retorne JSON válido com schema:

@@ -118,6 +118,135 @@ jobs:
           "
           cat ./tmp-devops/ai-analysis.md
 
+      - name: (Opcional) Sumario com LLM (OpenAI/Gemini)
+        if: always()
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || '' }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY || '' }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
+          GOOGLE_MODEL: ${{ vars.GOOGLE_MODEL || 'gemini-3.1-flash-lite' }}
+          GOOGLE_API_VERSION: ${{ vars.GOOGLE_API_VERSION || 'v1beta' }}
+          GOOGLE_BASE_URL: ${{ vars.GOOGLE_BASE_URL || 'https://generativelanguage.googleapis.com' }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || 'https://api.openai.com/v1' }}
+          OPENAI_TEMPERATURE: ${{ vars.OPENAI_TEMPERATURE || '0.2' }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const runs = JSON.parse(fs.readFileSync('./tmp-devops/workflow-runs.json','utf8'));
+            const report = fs.readFileSync('./tmp-devops/ai-analysis.md','utf8');
+
+            const googleKey = process.env.GOOGLE_API_KEY || '';
+            const openaiKey = process.env.OPENAI_API_KEY || '';
+            const provider = googleKey.trim().length > 0 ? 'gemini' : (openaiKey.trim().length > 0 ? 'openai' : 'none');
+
+            const systemText = 'Voce e um analista de DevOps. Gere um sumario curto e acionavel do relatorio abaixo. Responda em PT-BR e em bullets curtos (3-8 bullets). Nao inclua segredos. Nao gere markdown (use - ).';
+
+            const userText = [
+              'RELATORIO HEURISTICO:',
+              report,
+              '',
+              'DADOS (ultimos runs):',
+              JSON.stringify(runs.slice(0, 10), null, 2),
+            ].join('\n');
+
+            function appendResult(label, text) {
+              fs.appendFileSync('./tmp-devops/ai-analysis.md', '\n\n## Sumario LLM (' + provider + ')\n' + String(text).trim() + '\n');
+              console.log('LLM summary appended');
+            }
+
+            function appendSkipped(reason) {
+              fs.appendFileSync('./tmp-devops/ai-analysis.md', '\n\n## Sumario LLM (' + provider + ')\nLLM nao executado: ' + String(reason) + '\n');
+              console.log('LLM skipped:', reason);
+            }
+
+            function appendError(label, err) {
+              fs.appendFileSync('./tmp-devops/ai-analysis.md', '\n\n## Sumario LLM (' + provider + ')\nFalha ao gerar sumario via LLM: ' + String(err && err.message ? err.message : err) + '\n');
+              console.error(err);
+              process.exitCode = 0;
+            }
+
+            function runOpenAi() {
+              const payload = {
+                model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+                temperature: Number(process.env.OPENAI_TEMPERATURE || 0.2),
+                messages: [
+                  { role: 'system', content: systemText },
+                  { role: 'user', content: userText },
+                ],
+              };
+              const base = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
+              const url = base + '/chat/completions';
+              return fetch(url, {
+                method: 'POST',
+                headers: {
+                  'content-type': 'application/json',
+                  authorization: 'Bearer ' + process.env.OPENAI_API_KEY,
+                },
+                body: JSON.stringify(payload),
+              });
+            }
+
+            function runGemini() {
+              const body = {
+                systemInstruction: { role: 'user', parts: [{ text: systemText }] },
+                contents: [{ role: 'user', parts: [{ text: userText }] }],
+                generationConfig: {
+                  temperature: Number(process.env.OPENAI_TEMPERATURE || 0.2),
+                  candidateCount: 1,
+                },
+              };
+              const base = (process.env.GOOGLE_BASE_URL || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
+              const version = process.env.GOOGLE_API_VERSION === 'v1' ? 'v1' : 'v1beta';
+              const model = process.env.GOOGLE_MODEL || 'gemini-3.1-flash-lite';
+              const url = base + '/' + version + '/models/' + encodeURIComponent(model) + ':generateContent?key=' + encodeURIComponent(process.env.GOOGLE_API_KEY);
+              return fetch(url, {
+                method: 'POST',
+                headers: {
+                  'content-type': 'application/json',
+                  'x-goog-api-client': 'code-review-agent-m2/1.0.0',
+                },
+                body: JSON.stringify(body),
+              });
+            }
+
+            async function extractOpenAiText(res) {
+              const text = await res.text();
+              if (!res.ok) throw new Error('OpenAI HTTP ' + res.status + ': ' + text.slice(0, 200));
+              const json = JSON.parse(text);
+              const content = json?.choices?.[0]?.message?.content;
+              if (typeof content !== 'string') throw new Error('Resposta OpenAI sem content');
+              return content;
+            }
+
+            async function extractGeminiText(res) {
+              const text = await res.text();
+              if (!res.ok) throw new Error('Gemini HTTP ' + res.status + ': ' + text.slice(0, 200));
+              const json = JSON.parse(text);
+              const parts = json?.candidates?.[0]?.content?.parts || [];
+              const content = parts.map(p => (typeof p?.text === 'string' ? p.text : '')).join('\n').trim();
+              if (!content) throw new Error('Resposta Gemini sem parts/text');
+              return content;
+            }
+
+            (async () => {
+              try {
+                if (provider === 'gemini') {
+                  const res = await runGemini();
+                  const content = await extractGeminiText(res);
+                  appendResult(provider, content);
+                } else if (provider === 'openai') {
+                  const res = await runOpenAi();
+                  const content = await extractOpenAiText(res);
+                  appendResult(provider, content);
+                } else {
+                  appendSkipped('Nenhuma chave LLM configurada (OPENAI_API_KEY / GOOGLE_API_KEY).');
+                }
+              } catch (e) {
+                appendError(provider, e);
+              }
+            })();
+          "
+
       - name: Abrir Issue de anomalia (se risco >= 30%)
         if: always()
         uses: actions/github-script@v7

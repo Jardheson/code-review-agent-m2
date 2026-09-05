@@ -15,6 +15,34 @@ const StaticAnalysisInputSchema = z.object({
 
 type StaticAnalysisInput = z.infer<typeof StaticAnalysisInputSchema>;
 
+const StaticAnalysisResultSchema = z.object({
+  findings: z.array(
+    z.object({
+      id: z.string().optional(),
+      file: z.string(),
+      lineStart: z.number().int().min(1),
+      lineEnd: z.number().int().min(1),
+      severity: z.enum(['info', 'warning', 'error', 'critical']),
+      category: z.enum([
+        'security',
+        'performance',
+        'maintainability',
+        'style',
+        'bug_risk',
+        'best_practice',
+        'test_coverage',
+      ]),
+      title: z.string(),
+      description: z.string(),
+      suggestion: z.string().optional(),
+      ruleId: z.string().optional(),
+      confidence: z.number().min(0).max(1).optional(),
+    }),
+  ),
+  analyzedCount: z.number().int().min(0),
+  skippedCount: z.number().int().min(0),
+});
+
 interface PatternRule {
   id: string;
   name: string;
@@ -162,6 +190,28 @@ export class StaticAnalysisTool {
 
     logger.debug({ traceId, prId, filesCount: files.length }, 'Iniciando analise estatica');
 
+    if (env.STATIC_ANALYSIS_API_URL) {
+      const remote = await this.executeRemote(parsed.data, env.STATIC_ANALYSIS_API_URL);
+
+      auditor.record({
+        traceId,
+        prId,
+        actor: 'tool',
+        action: 'STATIC_ANALYSIS_COMPLETED',
+        resource: `pr:${prId}`,
+        metadata: {
+          analyzedCount: remote.analyzedCount,
+          skippedCount: remote.skippedCount,
+          findingsCount: remote.findings.length,
+          severities: this.countSeverities(remote.findings),
+          mode: 'remote',
+          endpoint: env.STATIC_ANALYSIS_API_URL,
+        },
+      });
+
+      return remote;
+    }
+
     const findings: Finding[] = [];
     let analyzed = 0;
     let skipped = 0;
@@ -191,10 +241,81 @@ export class StaticAnalysisTool {
         skippedCount: skipped,
         findingsCount: findings.length,
         severities: this.countSeverities(findings),
+        mode: 'local',
       },
     });
 
     return { findings, analyzedCount: analyzed, skippedCount: skipped };
+  }
+
+  private async executeRemote(
+    input: StaticAnalysisInput,
+    endpoint: string,
+  ): Promise<StaticAnalysisResult> {
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 15000);
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-trace-id': input.traceId,
+          'x-pr-id': input.prId,
+        },
+        body: JSON.stringify(input),
+        signal: ctrl.signal,
+      });
+
+      const text = await res.text();
+      if (!res.ok) {
+        throw new ToolExecutionError('Falha na integracao externa de static analysis', {
+          endpoint,
+          status: res.status,
+          body: text.slice(0, 2000),
+        });
+      }
+
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        throw new ToolExecutionError('Resposta invalida (nao-JSON) da integracao externa', {
+          endpoint,
+          body: text.slice(0, 2000),
+        });
+      }
+
+      const parsed = StaticAnalysisResultSchema.safeParse(json);
+      if (!parsed.success) {
+        throw new ToolExecutionError('Resposta invalida (schema) da integracao externa', {
+          endpoint,
+          issues: parsed.error.issues,
+        });
+      }
+
+      const normalizedFindings: Finding[] = parsed.data.findings.map((f) => ({
+        id: f.id ?? uuidv4(),
+        file: f.file,
+        lineStart: f.lineStart,
+        lineEnd: f.lineEnd,
+        severity: f.severity,
+        category: f.category,
+        title: f.title,
+        description: f.description,
+        suggestion: f.suggestion,
+        ruleId: f.ruleId,
+        confidence: f.confidence ?? 0.7,
+      }));
+
+      return {
+        findings: normalizedFindings,
+        analyzedCount: parsed.data.analyzedCount,
+        skippedCount: parsed.data.skippedCount,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   private analyzeFile(file: FileDiff): Finding[] {

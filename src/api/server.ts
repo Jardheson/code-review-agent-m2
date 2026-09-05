@@ -5,6 +5,7 @@ import { runGraph } from '../agent/graph.js';
 import { PullRequestInputSchema } from '../schemas/index.js';
 import { logger, createChildLogger } from '../observability/logger.js';
 import { auditor } from '../observability/auditor.js';
+import { staticAnalysisTool } from '../tools/staticAnalysisTool.js';
 import { AppError, InternalServerError, ValidationError } from '../errors/AppError.js';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'node:fs';
@@ -168,8 +169,8 @@ export function buildApp(): FastifyInstance {
     <div>
       <h1>Code Review Agent (CRA) — Projeto Avaliativo M2.2</h1>
       <p style="margin: 6px 0 0 0; color: var(--muted); font-size: 13.5px;">
-        Agente híbrido de revisão de PRs com <code>LangGraph</code> semântico, tool de análise estática,
-        memória persistente, observabilidade 2 sinais e low-code.
+        Agente híbrido de revisão de PRs com grafo de orquestração, tool de análise estática,
+        memória persistente, observabilidade 2 sinais, LLM opcional e low-code.
       </p>
     </div>
     <div>
@@ -183,6 +184,7 @@ export function buildApp(): FastifyInstance {
       <ul class="links" id="endpoints">
         <li><span><span class="tag get">GET</span> <a href="/health">/health</a></span><span class="tag">Monitoramento</span></li>
         <li><span><span class="tag post">POST</span> <a href="#" title="Use Insomnia, curl ou Postman com body JSON">/api/v1/review</a></span><span class="tag">Fluxo principal</span></li>
+        <li><span><span class="tag post">POST</span> <a href="#" title="Tool HTTP para integrações externas (ex: serviço separado na porta 3001)">/api/v1/tools/static-analysis</a></span><span class="tag">Tool HTTP</span></li>
         <li><span><span class="tag post">POST</span> <a href="#" title="Recebe triggers declarativos low-code (GitHub Actions, n8n, Make)">/api/v1/webhook/low-code</a></span><span class="tag">Integração low-code</span></li>
         <li><span><span class="tag get">GET</span> <a href="/api/v1/observability/audit">/api/v1/observability/audit</a></span><span class="tag">Auditoria (últimos 50 traces)</span></li>
         <li><span><span class="tag get">GET</span> <a href="/api/v1/observability/logs">/api/v1/observability/logs</a></span><span class="tag">Logs estruturados (últimas 100 linhas)</span></li>
@@ -305,6 +307,51 @@ npm run cli -- review --sample</pre>
           error: s.error,
         })),
       };
+    },
+  );
+
+  app.post(
+    '/api/v1/tools/static-analysis',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          minProperties: 1,
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              data: { type: 'object' },
+              traceId: { type: 'string' },
+            },
+            required: ['data', 'traceId'],
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      const traceId = (req as typeof req & { $traceId?: string }).$traceId ?? uuidv4();
+      const raw = req.body as Record<string, unknown> | null;
+      if (typeof raw !== 'object' || raw === null) {
+        const vErr = new ValidationError('Payload invalido em POST /api/v1/tools/static-analysis', {
+          receivedType: typeof raw,
+        });
+        return reply.status(400).send({ error: vErr.toJSON(), traceId });
+      }
+
+      const prId = typeof raw.prId === 'string' && raw.prId.length > 0 ? raw.prId : 'tool-http';
+      const input = {
+        ...raw,
+        prId,
+        traceId: typeof raw.traceId === 'string' && raw.traceId.length > 0 ? raw.traceId : traceId,
+      };
+
+      const log = createChildLogger({ prId, route: 'POST /api/v1/tools/static-analysis', traceId });
+      log.info('Recebida requisicao para tool HTTP (static analysis)');
+
+      const result = await staticAnalysisTool.execute(input);
+      return reply.send({ data: result, traceId });
     },
   );
 

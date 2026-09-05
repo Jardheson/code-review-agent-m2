@@ -4,10 +4,7 @@ import path from 'node:path';
 
 describe('Workflow DevOps Inteligente - análise de anomalias', () => {
   it('usa heredoc com delimitador quoted na etapa de análise IA', () => {
-    const workflowPath = path.resolve(
-      process.cwd(),
-      '.github/workflows/devops-inteligente.yml',
-    );
+    const workflowPath = path.resolve(process.cwd(), '.github/workflows/devops-inteligente.yml');
     const workflow = fs.readFileSync(workflowPath, 'utf8');
 
     const stepMatch = workflow.match(

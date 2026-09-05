@@ -98,7 +98,7 @@ jobs:
           - Tendencia recente: ${recencyTrend}
 
           ## Anomalias Detectadas (${anomalySignals.length})
-          ${anomalySignals.length === 0 ? 'Nenhuma anomalia relevante no periodo.' : anomalySignals.map((a, i) => `${i + 1}. ${a}`).join('\n')}
+          ${anomalySignals.length === 0 ? 'Nenhuma anomalia relevante no periodo.' : anomalySignals.map((a, i) => `${i + 1}. ${a}`).join('\\n')}
 
           ## Estimativa de Risco / Probabilidade de Falha
           - Probabilidade estimada de falha no proximo run: **${failureProb}%**

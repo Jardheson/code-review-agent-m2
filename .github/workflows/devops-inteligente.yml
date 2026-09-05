@@ -80,8 +80,8 @@ jobs:
             const recencyTrend = recentFail >= 3 ? 'crescente' : recentFail === 0 ? 'decrescente/estavel' : 'intermitente';
             const anomalySignals = [];
             if (failed.length / Math.max(1, completed.length) > 0.2) anomalySignals.push('Taxa de falha CI > 20% no periodo');
-            if (slowRuns > 0) anomalySignals.push(\`\${slowRuns} execucao(oes) com latencia > 150% da media (media \${avg.toFixed(1)}min)\`);
-            if (recentFail >= 2) anomalySignals.push(\`\${recentFail} falhas nos ultimos 7 runs (tendencia: \${recencyTrend})\`);
+            if (slowRuns > 0) anomalySignals.push(`${slowRuns} execucao(oes) com latencia > 150% da media (media ${avg.toFixed(1)}min)`);
+            if (recentFail >= 2) anomalySignals.push(`${recentFail} falhas nos ultimos 7 runs (tendencia: ${recencyTrend})`);
             const failureProb = Math.min(95, Math.round(
               (failed.length / Math.max(1, completed.length)) * 60 +
               (recentFail / 7) * 30 +

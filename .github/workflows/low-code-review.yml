@@ -182,21 +182,28 @@ jobs:
         if: always() && steps.collect-diff.outcome == 'success'
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET || 'local-dev-secret' }}
+          PR_NUMBER: ${{ steps.collect-diff.outputs.pr_number }}
+          PR_AUTHOR: ${{ steps.collect-diff.outputs.author }}
+          PR_PRIORITY: ${{ steps.collect-diff.outputs.priority }}
+          FILES_COUNT: ${{ steps.collect-diff.outputs.files_count }}
+          AGENT_EXIT_CODE: ${{ steps.run-agent.outputs.exit_code }}
+          AGENT_RUN_OUTCOME: ${{ steps.run-agent.outcome }}
+          AGENT_LLM_PROVIDER: ${{ steps.run-agent.outputs.llm_provider }}
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const path = require('path');
-            const pr_number = Number(steps['collect-diff'].outputs.pr_number || 0);
-            const author = String(steps['collect-diff'].outputs.author || 'unknown');
-            const priority = String(steps['collect-diff'].outputs.priority || 'medium');
-            const filesCount = Number(steps['collect-diff'].outputs.files_count || 0);
+            const pr_number = Number(process.env.PR_NUMBER || 0);
+            const author = String(process.env.PR_AUTHOR || 'unknown');
+            const priority = String(process.env.PR_PRIORITY || 'medium');
+            const filesCount = Number(process.env.FILES_COUNT || 0);
 
-            let agentExit = steps['run-agent']?.outputs?.exit_code;
-            if (agentExit === '' || agentExit === undefined) agentExit = (steps['run-agent']?.outcome === 'success') ? 0 : 1;
+            let agentExit = process.env.AGENT_EXIT_CODE;
+            if (agentExit === '' || agentExit === undefined) agentExit = (process.env.AGENT_RUN_OUTCOME === 'success') ? 0 : 1;
             agentExit = Number(agentExit);
-            const runStatus = steps['run-agent']?.outcome || 'skipped';
-            const llmProvider = String(steps['run-agent']?.outputs?.llm_provider || '(heuristico/chave_nao_configurada)');
+            const runStatus = process.env.AGENT_RUN_OUTCOME || 'skipped';
+            const llmProvider = String(process.env.AGENT_LLM_PROVIDER || '(heuristico/chave_nao_configurada)');
 
             let rawOutput = '';
             try {

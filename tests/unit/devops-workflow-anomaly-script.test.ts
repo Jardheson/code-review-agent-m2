@@ -14,8 +14,8 @@ describe('Workflow DevOps Inteligente - análise de anomalias', () => {
     expect(stepMatch).not.toBeNull();
 
     const step = stepMatch![0];
-    expect(step).toContain("node <<'NODE'");
-    expect(step).not.toContain('node -e "');
-    expect(step).toContain("fs.appendFileSync('./tmp-devops/ai-analysis.md', `");
+    expect(step).toMatch(/node\s+<<\s*'NODE'/);
+    expect(step).not.toMatch(/\bnode\s+-e\b/);
+    expect(step).toMatch(/fs\.appendFileSync\(['"]\.\/tmp-devops\/ai-analysis\.md['"],\s*`/);
   });
 });

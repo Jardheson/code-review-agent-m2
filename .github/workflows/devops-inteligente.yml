@@ -67,28 +67,28 @@ jobs:
           # Analise Inteligente de CI / DevOps (heuristicas + regras de risco)
           EOF
           node <<'NODE'
-            const fs = require('fs');
-            const runs = JSON.parse(fs.readFileSync('./tmp-devops/workflow-runs.json','utf8'));
-            const completed = runs.filter(r => r.status === 'completed');
-            const failed = completed.filter(r => r.conclusion === 'failure');
-            const success = completed.filter(r => r.conclusion === 'success');
-            const durations = completed.map(r => r.duration_min).filter(Boolean);
-            const avg = durations.reduce((a,b)=>a+b,0) / Math.max(1, durations.length);
-            const slowRuns = durations.filter(d => d > avg * 1.5).length;
-            const recent = completed.slice(0, 7);
-            const recentFail = recent.filter(r => r.conclusion === 'failure').length;
-            const recencyTrend = recentFail >= 3 ? 'crescente' : recentFail === 0 ? 'decrescente/estavel' : 'intermitente';
-            const anomalySignals = [];
-            if (failed.length / Math.max(1, completed.length) > 0.2) anomalySignals.push('Taxa de falha CI > 20% no periodo');
-            if (slowRuns > 0) anomalySignals.push(`${slowRuns} execucao(oes) com latencia > 150% da media (media ${avg.toFixed(1)}min)`);
-            if (recentFail >= 2) anomalySignals.push(`${recentFail} falhas nos ultimos 7 runs (tendencia: ${recencyTrend})`);
-            const failureProb = Math.min(95, Math.round(
-              (failed.length / Math.max(1, completed.length)) * 60 +
-              (recentFail / 7) * 30 +
-              (slowRuns / Math.max(1, completed.length)) * 10
-            ));
-            const riskLevel = failureProb >= 60 ? 'ALTO' : failureProb >= 30 ? 'MEDIO' : 'BAIXO';
-            fs.appendFileSync('./tmp-devops/ai-analysis.md', `
+          const fs = require('fs');
+          const runs = JSON.parse(fs.readFileSync('./tmp-devops/workflow-runs.json', 'utf8'));
+          const completed = runs.filter(r => r.status === 'completed');
+          const failed = completed.filter(r => r.conclusion === 'failure');
+          const success = completed.filter(r => r.conclusion === 'success');
+          const durations = completed.map(r => r.duration_min).filter(Boolean);
+          const avg = durations.reduce((a, b) => a + b, 0) / Math.max(1, durations.length);
+          const slowRuns = durations.filter(d => d > avg * 1.5).length;
+          const recent = completed.slice(0, 7);
+          const recentFail = recent.filter(r => r.conclusion === 'failure').length;
+          const recencyTrend = recentFail >= 3 ? 'crescente' : recentFail === 0 ? 'decrescente/estavel' : 'intermitente';
+          const anomalySignals = [];
+          if (failed.length / Math.max(1, completed.length) > 0.2) anomalySignals.push('Taxa de falha CI > 20% no periodo');
+          if (slowRuns > 0) anomalySignals.push(`${slowRuns} execucao(oes) com latencia > 150% da media (media ${avg.toFixed(1)}min)`);
+          if (recentFail >= 2) anomalySignals.push(`${recentFail} falhas nos ultimos 7 runs (tendencia: ${recencyTrend})`);
+          const failureProb = Math.min(95, Math.round(
+            (failed.length / Math.max(1, completed.length)) * 60 +
+            (recentFail / 7) * 30 +
+            (slowRuns / Math.max(1, completed.length)) * 10
+          ));
+          const riskLevel = failureProb >= 60 ? 'ALTO' : failureProb >= 30 ? 'MEDIO' : 'BAIXO';
+          fs.appendFileSync('./tmp-devops/ai-analysis.md', `
           ## Resumo dos Dados (n=${completed.length} runs completos)
           - Falhas: ${failed.length}
           - Sucessos: ${success.length}
@@ -98,7 +98,7 @@ jobs:
           - Tendencia recente: ${recencyTrend}
 
           ## Anomalias Detectadas (${anomalySignals.length})
-          ${anomalySignals.length === 0 ? 'Nenhuma anomalia relevante no periodo.' : anomalySignals.map((a,i) => `${i+1}. ${a}`).join('\n')}
+          ${anomalySignals.length === 0 ? 'Nenhuma anomalia relevante no periodo.' : anomalySignals.map((a, i) => `${i + 1}. ${a}`).join('\\n')}
 
           ## Estimativa de Risco / Probabilidade de Falha
           - Probabilidade estimada de falha no proximo run: **${failureProb}%**

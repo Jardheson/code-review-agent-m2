@@ -66,7 +66,7 @@ jobs:
           cat > ./tmp-devops/ai-analysis.md << 'EOF'
           # Analise Inteligente de CI / DevOps (heuristicas + regras de risco)
           EOF
-          node -e "
+          node <<'NODE'
             const fs = require('fs');
             const runs = JSON.parse(fs.readFileSync('./tmp-devops/workflow-runs.json','utf8'));
             const completed = runs.filter(r => r.status === 'completed');
@@ -80,29 +80,29 @@ jobs:
             const recencyTrend = recentFail >= 3 ? 'crescente' : recentFail === 0 ? 'decrescente/estavel' : 'intermitente';
             const anomalySignals = [];
             if (failed.length / Math.max(1, completed.length) > 0.2) anomalySignals.push('Taxa de falha CI > 20% no periodo');
-            if (slowRuns > 0) anomalySignals.push(\`\${slowRuns} execucao(oes) com latencia > 150% da media (media \${avg.toFixed(1)}min)\`);
-            if (recentFail >= 2) anomalySignals.push(\`\${recentFail} falhas nos ultimos 7 runs (tendencia: \${recencyTrend})\`);
+            if (slowRuns > 0) anomalySignals.push(`${slowRuns} execucao(oes) com latencia > 150% da media (media ${avg.toFixed(1)}min)`);
+            if (recentFail >= 2) anomalySignals.push(`${recentFail} falhas nos ultimos 7 runs (tendencia: ${recencyTrend})`);
             const failureProb = Math.min(95, Math.round(
               (failed.length / Math.max(1, completed.length)) * 60 +
               (recentFail / 7) * 30 +
               (slowRuns / Math.max(1, completed.length)) * 10
             ));
             const riskLevel = failureProb >= 60 ? 'ALTO' : failureProb >= 30 ? 'MEDIO' : 'BAIXO';
-            fs.appendFileSync('./tmp-devops/ai-analysis.md', \`
-          ## Resumo dos Dados (n=\${completed.length} runs completos)
-          - Falhas: \${failed.length}
-          - Sucessos: \${success.length}
-          - Duracao media: \${avg.toFixed(1)} minutos
-          - Runs lentas (>150% media): \${slowRuns}
-          - Falhas nos ultimos 7 runs: \${recentFail}
-          - Tendencia recente: \${recencyTrend}
+            fs.appendFileSync('./tmp-devops/ai-analysis.md', `
+          ## Resumo dos Dados (n=${completed.length} runs completos)
+          - Falhas: ${failed.length}
+          - Sucessos: ${success.length}
+          - Duracao media: ${avg.toFixed(1)} minutos
+          - Runs lentas (>150% media): ${slowRuns}
+          - Falhas nos ultimos 7 runs: ${recentFail}
+          - Tendencia recente: ${recencyTrend}
 
-          ## Anomalias Detectadas (\${anomalySignals.length})
-          \${anomalySignals.length === 0 ? 'Nenhuma anomalia relevante no periodo.' : anomalySignals.map((a,i) => \`\${i+1}. \${a}\`).join('\\n')}
+          ## Anomalias Detectadas (${anomalySignals.length})
+          ${anomalySignals.length === 0 ? 'Nenhuma anomalia relevante no periodo.' : anomalySignals.map((a,i) => `${i+1}. ${a}`).join('\n')}
 
           ## Estimativa de Risco / Probabilidade de Falha
-          - Probabilidade estimada de falha no proximo run: **\${failureProb}%**
-          - Nivel de risco: **\${riskLevel}**
+          - Probabilidade estimada de falha no proximo run: **${failureProb}%**
+          - Nivel de risco: **${riskLevel}**
 
           ## Justificativa
           A estimativa combina (1) taxa historica de falha (60% peso), (2) recencia/frequencia de falhas (30%) e
@@ -114,8 +114,8 @@ jobs:
           - Investigar runs lentos em busca de flaky tests ou dependencias externas
           - Se risco ALTO: rodar pipeline em develop extra vezes antes de mergear para main
           - Configurar alerta via webhook / email / discord quando risco >= 50%
-          \`);
-          "
+          `);
+          NODE
           cat ./tmp-devops/ai-analysis.md
 
       - name: (Opcional) Sumario com LLM (OpenAI/Gemini)

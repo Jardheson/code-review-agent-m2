@@ -66,7 +66,7 @@ jobs:
           cat > ./tmp-devops/ai-analysis.md << 'EOF'
           # Analise Inteligente de CI / DevOps (heuristicas + regras de risco)
           EOF
-          node -e "
+          node <<'NODE'
             const fs = require('fs');
             const runs = JSON.parse(fs.readFileSync('./tmp-devops/workflow-runs.json','utf8'));
             const completed = runs.filter(r => r.status === 'completed');
@@ -115,7 +115,7 @@ jobs:
           - Se risco ALTO: rodar pipeline em develop extra vezes antes de mergear para main
           - Configurar alerta via webhook / email / discord quando risco >= 50%
           \`);
-          "
+          NODE
           cat ./tmp-devops/ai-analysis.md
 
       - name: (Opcional) Sumario com LLM (OpenAI/Gemini)

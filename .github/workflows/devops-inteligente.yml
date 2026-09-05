@@ -115,7 +115,7 @@ jobs:
           - Se risco ALTO: rodar pipeline em develop extra vezes antes de mergear para main
           - Configurar alerta via webhook / email / discord quando risco >= 50%
           `);
-NODE
+          NODE
           cat ./tmp-devops/ai-analysis.md
 
       - name: (Opcional) Sumario com LLM (OpenAI/Gemini)
